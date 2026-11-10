@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>CamMirror</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#eee;font-family:-apple-system,"Apple SD Gothic Neo",sans-serif;overflow:hidden;-webkit-user-select:none;-webkit-touch-callout:none}
+  .page{display:none;position:fixed;top:0;left:0;width:100%;height:100%}
+  .page.on{display:block}
+  video{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:contain;background:#000}
+  video.cover{object-fit:cover}
+  #camVideo{object-fit:cover}
+  .status{position:fixed;top:0;left:0;right:0;padding:10px 14px;padding-top:calc(10px + env(safe-area-inset-top));font-size:15px;background:rgba(0,0,0,.55);-webkit-transition:opacity .4s;transition:opacity .4s}
+  .status.hide{opacity:0}
+  .bar{position:fixed;left:0;right:0;bottom:0;padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom));background:-webkit-linear-gradient(top,transparent,rgba(0,0,0,.75));background:linear-gradient(transparent,rgba(0,0,0,.75));display:-webkit-flex;display:flex;gap:10px;-webkit-align-items:center;align-items:center;-webkit-flex-wrap:wrap;flex-wrap:wrap}
+  button,select,input{font-size:17px;padding:12px 16px;border:0;border-radius:10px;background:#fff;color:#000;font-family:inherit}
+  button.red{background:#ff3b30;color:#fff;font-weight:700}
+  .center{position:fixed;top:0;left:0;width:100%;height:100%;display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column;-webkit-justify-content:center;justify-content:center;-webkit-align-items:center;align-items:center;gap:18px;padding:24px;box-sizing:border-box;text-align:center}
+  .big{font-size:26px;padding:22px 40px;width:100%;max-width:360px}
+  .code{font-size:56px;font-weight:700;letter-spacing:8px;background:#222;padding:12px 24px;border-radius:14px}
+  .hint{color:#aaa;font-size:15px;line-height:1.6}
+  input.code-in{font-size:32px;letter-spacing:8px;text-align:center;width:240px}
+  #camCodeBox{position:fixed;top:0;left:0;right:0;padding:12px;padding-top:calc(12px + env(safe-area-inset-top));text-align:center;background:rgba(0,0,0,.55);font-size:15px}
+  #camCodeBox b{font-size:30px;letter-spacing:6px;display:block}
+</style>
+</head>
+<body>
+
+<!-- ───── 첫 화면: 역할 선택 ───── -->
+<div id="home" class="page on">
+  <div class="center">
+    <div style="font-size:28px;font-weight:700">CamMirror</div>
+    <button class="red big" onclick="go('cam')">📱 촬영 (iPhone)</button>
+    <button class="big" onclick="go('view')">🖥 보기 (iPad / PC)</button>
+    <div class="hint">두 기기 모두 같은 Wi-Fi에 있어야 합니다.<br>처음 한 번만 코드를 맞추면 다음부턴 자동 연결됩니다.</div>
+  </div>
+</div>
+
+<!-- ───── iPhone 촬영 ───── -->
+<div id="cam" class="page">
+  <video id="camVideo" autoplay playsinline muted></video>
+  <div id="camCodeBox">아이패드에서 이 코드 입력<b id="camCode">------</b><span id="camStatus">카메라를 시작하세요</span></div>
+  <div class="bar">
+    <button id="camStart" class="red" style="-webkit-flex:1;flex:1">카메라 시작</button>
+    <select id="camRes"><option value="1280x720">720p</option><option value="1920x1080" selected>1080p</option></select>
+    <button id="camFlip">전/후면</button>
+    <button id="camNewCode" title="코드 새로 만들기">코드변경</button>
+  </div>
+</div>
+
+<!-- ───── iPad / PC 보기 ───── -->
+<div id="view" class="page">
+  <video id="viewVideo" autoplay playsinline muted></video>
+  <div id="viewSetup" class="center">
+    <div style="font-size:20px">iPhone 화면에 뜬 코드</div>
+    <input id="viewCode" class="code-in" type="tel" maxlength="6" placeholder="000000">
+    <button id="viewStart" class="red big">연결</button>
+    <div class="hint">연결되면 전체화면으로 바뀝니다.<br>더블탭: 화면 채우기 ↔ 전체 보기</div>
+  </div>
+  <div id="viewStatus" class="status hide"></div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.3.2/dist/peerjs.min.js"></script>
+<script>
+// ───────────────────────────── 공통
+var PREFIX = 'cammirror-';          // PeerJS 공개 서버에서 다른 사람과 안 겹치게
+var ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+function $(id){ return document.getElementById(id); }
+function go(role){
+  ['home','cam','view'].forEach(function(p){ $(p).className = 'page' + (p === role ? ' on' : ''); });
+  if (role === 'cam') camInit();
+  if (role === 'view') viewInit();
+}
+function randCode(){ return String(Math.floor(100000 + Math.random() * 900000)); }
+function newPeer(id){
+  return new Peer(id, { host: '0.peerjs.com', port: 443, secure: true, path: '/', config: ICE, debug: 1 });
+}
+
+// ───────────────────────────── iPhone 촬영
+var cam = { peer:null, stream:null, calls:{}, facing:'environment', running:false, code:null, inited:false };
+
+function camInit(){
+  if (cam.inited) return; cam.inited = true;
+  cam.code = localStorage.getItem('camCode') || randCode();
+  localStorage.setItem('camCode', cam.code);
+  $('camCode').textContent = cam.code;
+
+  $('camStart').onclick = async function(){
+    try {
+      await camStartCamera();
+      cam.running = true;
+      $('camStart').style.display = 'none';
+      camConnectPeer();
+      if (navigator.wakeLock) { try { await navigator.wakeLock.request('screen'); } catch(e){} }
+    } catch(e) {
+      camStatus('카메라 실패: ' + e.name + ' ' + e.message + (location.protocol !== 'https:' ? ' (https 주소로 열어야 함)' : ''));
+    }
+  };
+  $('camFlip').onclick = function(){ cam.facing = cam.facing === 'environment' ? 'user' : 'environment'; if (cam.running) camStartCamera(); };
+  $('camRes').onchange = function(){ if (cam.running) camStartCamera(); };
+  $('camNewCode').onclick = function(){
+    if (!confirm('코드를 새로 만들면 아이패드에서 다시 입력해야 합니다. 바꿀까요?')) return;
+    localStorage.removeItem('camCode'); location.reload();
+  };
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) camStatus('이 브라우저는 카메라 사용 불가. Safari로 여세요.');
+}
+function camStatus(t){ $('camStatus').textContent = t; }
+
+async function camStartCamera(){
+  if (cam.stream) cam.stream.getTracks().forEach(function(t){ t.stop(); });
+  var wh = $('camRes').value.split('x');
+  cam.stream = await navigator.mediaDevices.getUserMedia({
+    audio:false,
+    video:{ facingMode: cam.facing, width:{ideal:+wh[0]}, height:{ideal:+wh[1]}, frameRate:{ideal:30} }
+  });
+  $('camVideo').srcObject = cam.stream;
+  var track = cam.stream.getVideoTracks()[0];
+  Object.keys(cam.calls).forEach(function(id){
+    var pc = cam.calls[id].peerConnection;
+    if (pc) pc.getSenders().forEach(function(s){ if (s.track && s.track.kind === 'video') s.replaceTrack(track); });
+  });
+  var s = track.getSettings ? track.getSettings() : {};
+  camStatus('카메라 ' + (s.width||'?') + 'x' + (s.height||'?') + ' · 뷰어 ' + Object.keys(cam.calls).length + '대');
+}
+
+function camConnectPeer(){
+  if (cam.peer) { try { cam.peer.destroy(); } catch(e){} }
+  var p = newPeer(PREFIX + cam.code);
+  cam.peer = p;
+  camStatus('서버 연결 중...');
+  p.on('open', function(){ camStatus('대기 중 · 아이패드에서 코드 ' + cam.code + ' 입력'); });
+  // 뷰어가 데이터 채널로 "나 여기 있어" 하면 → 우리가 영상 통화를 건다
+  p.on('connection', function(conn){
+    conn.on('open', function(){
+      var call = p.call(conn.peer, cam.stream);
+      cam.calls[conn.peer] = call;
+      camStatus('뷰어 ' + Object.keys(cam.calls).length + '대 연결 (전송 중)');
+      camBoostBitrate(call);
+      call.on('close', function(){ delete cam.calls[conn.peer]; camStatus('뷰어 ' + Object.keys(cam.calls).length + '대 연결'); });
+      call.on('error', function(){ delete cam.calls[conn.peer]; });
+    });
+    conn.on('close', function(){ var c = cam.calls[conn.peer]; if (c) { try { c.close(); } catch(e){} } delete cam.calls[conn.peer]; camStatus('뷰어 ' + Object.keys(cam.calls).length + '대 연결'); });
+  });
+  p.on('error', function(err){
+    if (err.type === 'unavailable-id') { camStatus('코드가 이미 사용 중. 잠시 후 재시도...'); setTimeout(camConnectPeer, 3000); }
+    else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed') { camStatus('서버 끊김, 재연결 중...'); setTimeout(camConnectPeer, 3000); }
+    else camStatus('오류: ' + err.type);
+  });
+  p.on('disconnected', function(){ if (cam.running) { camStatus('서버 끊김, 재연결 중...'); try { p.reconnect(); } catch(e){ setTimeout(camConnectPeer, 3000); } } });
+}
+function camBoostBitrate(call){
+  setTimeout(function(){
+    var pc = call.peerConnection; if (!pc) return;
+    pc.getSenders().forEach(function(s){
+      if (!s.track || s.track.kind !== 'video') return;
+      try { var prm = s.getParameters(); if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}]; prm.encodings[0].maxBitrate = 6000000; s.setParameters(prm); } catch(e){}
+    });
+  }, 500);
+}
+
+// ───────────────────────────── iPad / PC 보기
+var view = { peer:null, conn:null, call:null, code:null, inited:false, timer:null, hideTimer:null };
+
+function viewInit(){
+  if (view.inited) return; view.inited = true;
+  var saved = localStorage.getItem('viewCode');
+  if (saved) $('viewCode').value = saved;
+  $('viewStart').onclick = function(){
+    var c = ($('viewCode').value || '').replace(/\D/g,'');
+    if (c.length !== 6) { alert('6자리 코드를 입력하세요'); return; }
+    view.code = c; localStorage.setItem('viewCode', c);
+    $('viewSetup').style.display = 'none';
+    var pl = $('viewVideo').play(); if (pl && pl.catch) pl.catch(function(){});
+    viewConnect();
+  };
+  var v = $('viewVideo'), lastTap = 0;
+  document.addEventListener('touchend', function(){
+    var now = Date.now(); if (now - lastTap < 300) v.className = v.className ? '' : 'cover'; lastTap = now;
+  });
+  document.addEventListener('touchstart', function(){ viewShowStatus(); });
+  if (!window.RTCPeerConnection) viewStatus('이 브라우저는 WebRTC 미지원', true);
+}
+function viewStatus(t, keep){
+  $('viewStatus').textContent = t; viewShowStatus(keep);
+}
+function viewShowStatus(keep){
+  var el = $('viewStatus'); el.className = 'status';
+  if (view.hideTimer) clearTimeout(view.hideTimer);
+  if (!keep) view.hideTimer = setTimeout(function(){ el.className = 'status hide'; }, 3000);
+}
+function viewRetry(ms, msg){
+  if (msg) viewStatus(msg, true);
+  if (view.timer) clearTimeout(view.timer);
+  view.timer = setTimeout(viewConnect, ms || 3000);
+}
+function viewConnect(){
+  if (view.peer) { try { view.peer.destroy(); } catch(e){} view.peer = null; }
+  viewStatus('iPhone 찾는 중... (코드 ' + view.code + ')', true);
+  var p = newPeer(PREFIX + view.code + '-v' + Math.random().toString(36).slice(2,8));
+  view.peer = p;
+  p.on('open', function(){
+    var conn = p.connect(PREFIX + view.code, { reliable: true });
+    view.conn = conn;
+    var opened = false;
+    conn.on('open', function(){ opened = true; viewStatus('iPhone 응답, 영상 받는 중...', true); });
+    conn.on('close', function(){ viewRetry(2000, 'iPhone 연결 끊김, 재시도...'); });
+    conn.on('error', function(){ viewRetry(3000, 'iPhone 연결 실패, 재시도...'); });
+    setTimeout(function(){ if (!opened) viewRetry(500, 'iPhone 대기 중... (iPhone에서 카메라 시작을 눌렀는지 확인)'); }, 8000);
+  });
+  p.on('call', function(call){
+    view.call = call;
+    call.answer();                               // 우리 쪽 스트림 없음
+    var attach = function(st){
+      var v = $('viewVideo');
+      if (v.srcObject !== st) { v.srcObject = st; var pl = v.play(); if (pl && pl.catch) pl.catch(function(){}); }
+      viewStatus('연결됨');
+    };
+    call.on('stream', attach);
+    call.on('close', function(){ viewRetry(2000, '영상 끊김, 재시도...'); });
+    call.on('error', function(){ viewRetry(3000, '영상 오류, 재시도...'); });
+    setTimeout(function(){                       // 구형 Safari: stream 이벤트 누락 대비
+      var pc = call.peerConnection;
+      if (pc && pc.getRemoteStreams && pc.getRemoteStreams().length && !$('viewVideo').srcObject) attach(pc.getRemoteStreams()[0]);
+    }, 2000);
+  });
+  p.on('error', function(err){
+    if (err.type === 'peer-unavailable') viewRetry(3000, 'iPhone 대기 중... (코드 ' + view.code + ', iPhone에서 카메라 시작을 누르세요)');
+    else viewRetry(4000, '오류: ' + err.type + ', 재시도...');
+  });
+  p.on('disconnected', function(){ viewRetry(3000, '서버 끊김, 재연결 중...'); });
+}
+
+// 주소에 #cam / #view 붙이면 바로 그 화면으로 (즐겨찾기용)
+if (location.hash === '#cam') go('cam');
+else if (location.hash === '#view') go('view');
+</script>
+</body>
+</html>
